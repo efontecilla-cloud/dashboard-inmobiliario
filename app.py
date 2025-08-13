@@ -1,7 +1,7 @@
 import pandas as pd
 import plotly.graph_objects as go
 import dash
-from dash import dcc, html, Input, Output, State, dash_table
+from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 
 def cargar_datos(archivo_excel):
@@ -18,7 +18,7 @@ def crear_grafico_3d(df_filtrado):
     
     colores_estados = {
         'Disponible': '#28A745',
-        'Reservado': '#FFC107',
+        'Moncurri': '#FFC107',     # Cambio de Reservado a Moncurri
         'Promesado': '#DC3545',
         'Stock Ausente': '#6C757D'
     }
@@ -121,6 +121,9 @@ def crear_grafico_3d(df_filtrado):
 # Crear la aplicación Dash
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
+# IMPORTANTE: Para deploy
+server = app.server
+
 # Cargar datos globalmente
 df_global = cargar_datos("Datos.xlsx")
 
@@ -198,7 +201,7 @@ app.layout = dbc.Container([
                                 options=[
                                     {'label': '📊 Todos los estados', 'value': 'todos'},
                                     {'label': '🟢 Solo Disponibles', 'value': 'disponible'},
-                                    {'label': '🟡 Solo Reservados', 'value': 'reservado'},
+                                    {'label': '🟡 Solo Moncurri', 'value': 'moncurri'},  # Cambio aquí
                                     {'label': '🔴 Solo Promesados', 'value': 'promesado'}
                                 ],
                                 value='todos',
@@ -206,19 +209,8 @@ app.layout = dbc.Container([
                             ),
                         ], width=6)
                     ]),
-                    dbc.Row([
-                        dbc.Col([
-                            html.Label("Exportar Dashboard:", className="fw-bold mb-2"),
-                            dbc.ButtonGroup([
-                                dbc.Button("📧 Generar HTML para Email", id="btn-export-html", color="success", size="sm"),
-                                dbc.Button("📊 Exportar Datos CSV", id="btn-export-csv", color="info", size="sm"),
-                                dbc.Button("📸 Capturar PNG", id="btn-export-png", color="warning", size="sm"),
-                            ], className="d-grid")
-                        ], width=12)
-                    ], className="mt-3"),
                     html.Hr(),
-                    html.Div(id="info-filtros", className="text-muted"),
-                    html.Div(id="export-status", className="mt-2")
+                    html.Div(id="info-filtros", className="text-muted")
                 ])
             ], className="shadow-sm")
         ], width=8),
@@ -299,193 +291,6 @@ def botones_vista_rapida(btn_todos, btn_altos, btn_bajos):
     ctx = dash.callback_context
     if not ctx.triggered:
         return dash.no_update
-
-@app.callback(
-    Output('export-status', 'children'),
-    [Input('btn-export-html', 'n_clicks'),
-     Input('btn-export-csv', 'n_clicks'),
-     Input('btn-export-png', 'n_clicks')],
-    [State('filtro-pisos', 'value'),
-     State('filtro-vista', 'value'),
-     State('filtro-estados', 'value'),
-     State('filtro-tipologia', 'value')],
-    prevent_initial_call=True
-)
-def exportar_dashboard(btn_html, btn_csv, btn_png, pisos, vista, estados, tipologia):
-    import datetime
-    from plotly.subplots import make_subplots
-    import plotly.io as pio
-    
-    if df_global is None:
-        return dbc.Alert("❌ No hay datos para exportar", color="danger")
-    
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return dash.no_update
-    
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    try:
-        # Aplicar los mismos filtros que en el dashboard
-        df_filtrado = df_global.copy()
-        
-        if pisos and len(pisos) > 0:
-            df_filtrado = df_filtrado[df_filtrado['PISO'].isin(pisos)]
-        
-        tipos_sin_lago = [1, 2, 3, 11, 12, 13]
-        tipos_con_lago = [4, 5, 6, 7, 8, 9, 10]
-        
-        if vista == 'sin_lago':
-            df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_sin_lago)]
-        elif vista == 'con_lago':
-            df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_con_lago)]
-        
-        if estados == 'disponible':
-            df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Disponible']
-        elif estados == 'reservado':
-            df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Reservado']
-        elif estados == 'promesado':
-            df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Promesado']
-        
-        if tipologia and len(tipologia) > 0 and 'TIPOLOGIA' in df_filtrado.columns:
-            df_filtrado = df_filtrado[df_filtrado['TIPOLOGIA'].isin(tipologia)]
-        
-        if button_id == 'btn-export-html':
-            # Crear gráfico completo para HTML
-            fig = crear_grafico_3d(df_filtrado)
-            
-            # Calcular métricas para incluir en HTML
-            total_precio = df_filtrado['PRECIO'].sum() if 'PRECIO' in df_filtrado.columns else 0
-            total_m2 = df_filtrado['M2'].sum() if 'M2' in df_filtrado.columns else 0
-            promedio_uf_m2 = df_filtrado['UF/M2'].mean() if 'UF/M2' in df_filtrado.columns and len(df_filtrado) > 0 else 0
-            total_departamentos = len(df_filtrado)
-            
-            # Estados
-            disponibles = len(df_filtrado[df_filtrado['ESTADO'] == 'Disponible'])
-            reservados = len(df_filtrado[df_filtrado['ESTADO'] == 'Reservado'])
-            promesados = len(df_filtrado[df_filtrado['ESTADO'] == 'Promesado'])
-            
-            # Crear HTML personalizado
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Dashboard Inmobiliario - Reporte {timestamp}</title>
-                <meta charset="utf-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f8f9fa; }}
-                    .header {{ text-align: center; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-                    .metrics {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-                    .metric-row {{ display: flex; justify-content: space-around; margin: 10px 0; }}
-                    .metric {{ text-align: center; padding: 10px; }}
-                    .metric-value {{ font-size: 24px; font-weight: bold; color: #007BFF; }}
-                    .metric-label {{ font-size: 12px; color: #6c757d; }}
-                    .estado-disponible {{ color: #28A745; }}
-                    .estado-reservado {{ color: #FFC107; }}
-                    .estado-promesado {{ color: #DC3545; }}
-                    h1 {{ color: #2C3E50; margin: 0; }}
-                    h2 {{ color: #2C3E50; text-align: center; }}
-                    .timestamp {{ color: #6c757d; font-size: 14px; text-align: center; margin-top: 10px; }}
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>🏢 Dashboard Inmobiliario</h1>
-                    <p>Reporte generado automáticamente</p>
-                    <div class="timestamp">Generado el: {datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")}</div>
-                </div>
-                
-                <div class="metrics">
-                    <h2>📊 MÉTRICAS TOTALES</h2>
-                    <div class="metric-row">
-                        <div class="metric">
-                            <div class="metric-value">{total_departamentos}</div>
-                            <div class="metric-label">Total Departamentos</div>
-                        </div>
-                        <div class="metric">
-                            <div class="metric-value">${total_precio:,.0f}</div>
-                            <div class="metric-label">Total Precio</div>
-                        </div>
-                        <div class="metric">
-                            <div class="metric-value">{total_m2:,.1f} m²</div>
-                            <div class="metric-label">Total Superficie</div>
-                        </div>
-                        <div class="metric">
-                            <div class="metric-value">{promedio_uf_m2:.2f}</div>
-                            <div class="metric-label">Promedio UF/m²</div>
-                        </div>
-                    </div>
-                    
-                    <h2>📈 DISTRIBUCIÓN POR ESTADO</h2>
-                    <div class="metric-row">
-                        <div class="metric">
-                            <div class="metric-value estado-disponible">{disponibles}</div>
-                            <div class="metric-label">🟢 Disponibles</div>
-                        </div>
-                        <div class="metric">
-                            <div class="metric-value estado-reservado">{reservados}</div>
-                            <div class="metric-label">🟡 Reservados</div>
-                        </div>
-                        <div class="metric">
-                            <div class="metric-value estado-promesado">{promesados}</div>
-                            <div class="metric-label">🔴 Promesados</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div style="background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    <h2>🏢 Visualización 3D del Edificio</h2>
-                    {fig.to_html(include_plotlyjs=True, div_id="grafico-3d")}
-                </div>
-            </body>
-            </html>
-            """
-            
-            filename = f"dashboard_inmobiliario_{timestamp}.html"
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            
-            return dbc.Alert([
-                html.Strong("✅ HTML Generado: "), 
-                f"Archivo '{filename}' creado exitosamente. ",
-                html.Br(),
-                "📧 Puedes enviarlo por email como adjunto."
-            ], color="success")
-        
-        elif button_id == 'btn-export-csv':
-            # Exportar datos filtrados a CSV
-            filename = f"datos_dashboard_{timestamp}.csv"
-            df_filtrado.to_csv(filename, index=False, encoding='utf-8-sig')
-            
-            return dbc.Alert([
-                html.Strong("✅ CSV Generado: "), 
-                f"Archivo '{filename}' con {len(df_filtrado)} registros creado."
-            ], color="success")
-        
-        elif button_id == 'btn-export-png':
-            # Exportar gráfico como imagen PNG
-            fig = crear_grafico_3d(df_filtrado)
-            filename = f"grafico_3d_{timestamp}.png"
-            
-            # Configurar para exportar como imagen
-            fig.update_layout(
-                width=1200,
-                height=800,
-                title=f"Dashboard Inmobiliario - {datetime.datetime.now().strftime('%d/%m/%Y')}"
-            )
-            
-            pio.write_image(fig, filename, format='png', engine='kaleido')
-            
-            return dbc.Alert([
-                html.Strong("✅ PNG Generado: "), 
-                f"Imagen '{filename}' creada. Ideal para incluir en presentaciones."
-            ], color="success")
-            
-    except Exception as e:
-        return dbc.Alert(f"❌ Error al exportar: {str(e)}", color="danger")
-    
-    return dash.no_update
     
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
     pisos_disponibles = sorted(df_global['PISO'].unique())
@@ -531,11 +336,11 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     elif vista_seleccionada == 'con_lago':
         df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_con_lago)]
     
-    # Filtrar por estados
+    # Filtrar por estados (cambio de 'reservado' a 'moncurri')
     if estados_seleccionados == 'disponible':
         df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Disponible']
-    elif estados_seleccionados == 'reservado':
-        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Reservado']
+    elif estados_seleccionados == 'moncurri':  # Cambio aquí
+        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Moncurri']
     elif estados_seleccionados == 'promesado':
         df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Promesado']
     
@@ -552,8 +357,8 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     promedio_uf_m2 = df_filtrado['UF/M2'].mean() if 'UF/M2' in df_filtrado.columns and len(df_filtrado) > 0 else 0
     total_departamentos = len(df_filtrado)
     
-    # Calcular métricas por estado
-    estados = ['Disponible', 'Reservado', 'Promesado']
+    # Calcular métricas por estado (cambio aquí también)
+    estados = ['Disponible', 'Moncurri', 'Promesado']  # Cambio de 'Reservado' a 'Moncurri'
     metricas_por_estado = {}
     
     for estado in estados:
@@ -631,30 +436,30 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
             ], width=3)
         ], className="mb-2"),
         
-        # RESERVADOS
-        html.H6("🟡 RESERVADOS", className="mb-2", style={'color': '#FFC107', 'fontWeight': 'bold'}),
+        # MONCURRI (cambio aquí)
+        html.H6("🟡 MONCURRI", className="mb-2", style={'color': '#FFC107', 'fontWeight': 'bold'}),
         dbc.Row([
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Reservado']['cantidad']}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Moncurri']['cantidad']}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Cantidad", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"${metricas_por_estado['Reservado']['precio']:,.0f}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"${metricas_por_estado['Moncurri']['precio']:,.0f}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Precio Total", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Reservado']['m2']:,.1f} m²", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Moncurri']['m2']:,.1f} m²", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Superficie", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Reservado']['uf_m2']:.2f}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Moncurri']['uf_m2']:.2f}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Prom. UF/m²", className="text-muted")
                 ], className="text-center p-1")
             ], width=3)
@@ -692,7 +497,7 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     
     # Información de filtros mejorada
     total_disponibles = metricas_por_estado['Disponible']['cantidad']
-    total_reservados = metricas_por_estado['Reservado']['cantidad']
+    total_moncurri = metricas_por_estado['Moncurri']['cantidad']  # Cambio aquí
     total_promesados = metricas_por_estado['Promesado']['cantidad']
     
     # Crear texto descriptivo de filtros
@@ -714,7 +519,7 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     estado_texto = {
         'todos': 'Todos los estados',
         'disponible': '🟢 Solo Disponibles',
-        'reservado': '🟡 Solo Reservados',
+        'moncurri': '🟡 Solo Moncurri',  # Cambio aquí
         'promesado': '🔴 Solo Promesados'
     }
     filtros_texto.append(f"Estados: {estado_texto.get(estados_seleccionados, 'Todos')}")
@@ -730,7 +535,7 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
         html.P([
             html.Strong(f"Total: {total_departamentos} departamentos | "),
             html.Span(f"🟢 {total_disponibles} Disponibles", className="me-3"),
-            html.Span(f"🟡 {total_reservados} Reservados", className="me-3"),
+            html.Span(f"🟡 {total_moncurri} Moncurri", className="me-3"),  # Cambio aquí
             html.Span(f"🔴 {total_promesados} Promesados")
         ], className="mb-0")
     ])
