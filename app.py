@@ -1,34 +1,310 @@
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 import dash
 from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
+from datetime import datetime
+import numpy as np
 
 def cargar_datos(archivo_excel):
     try:
         df = pd.read_excel(archivo_excel)
         print(f"Datos cargados: {len(df)} departamentos")
+        print(f"Columnas encontradas: {list(df.columns)}")
+        
+        # Limpiar columnas numéricas que pueden tener espacios o comas
+        if 'PRECIO' in df.columns:
+            df['PRECIO'] = pd.to_numeric(df['PRECIO'].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce')
+        if 'M2' in df.columns:
+            df['M2'] = pd.to_numeric(df['M2'].astype(str).str.replace(',', '.'), errors='coerce')
+        if 'UF/M2' in df.columns:
+            df['UF/M2'] = pd.to_numeric(df['UF/M2'].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce')
+        
+        # Debug: mostrar estados únicos encontrados
+        if 'ESTADO' in df.columns:
+            estados_unicos = df['ESTADO'].unique()
+            print(f"Estados encontrados: {list(estados_unicos)}")
+        
+        # Procesar fechas si existe la columna
+        if 'FECHA' in df.columns:
+            print(f"Procesando columna FECHA...")
+            print(f"Primeras 10 fechas raw: {df['FECHA'].head(10).tolist()}")
+            print(f"Tipos de datos en FECHA: {df['FECHA'].dtype}")
+            
+            # Crear una copia para trabajar
+            df['FECHA_ORIGINAL'] = df['FECHA'].copy()
+            
+            # Si ya son datetime, mantenerlas
+            if df['FECHA'].dtype == 'datetime64[ns]':
+                print("Las fechas ya están en formato datetime")
+            else:
+                # Intentar múltiples formatos de fecha
+                df['FECHA'] = pd.to_datetime(df['FECHA'], errors='coerce')
+                
+                # Si falló, intentar formato específico dd.mm.yyyy
+                if df['FECHA'].isna().all():
+                    print("Intentando formato dd.mm.yyyy...")
+                    df['FECHA'] = pd.to_datetime(df['FECHA_ORIGINAL'], format='%d.%m.%Y', errors='coerce')
+                
+                # Si aún falló, intentar otros formatos comunes
+                if df['FECHA'].isna().all():
+                    print("Intentando otros formatos...")
+                    for formato in ['%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y']:
+                        try:
+                            df['FECHA'] = pd.to_datetime(df['FECHA_ORIGINAL'], format=formato, errors='coerce')
+                            if not df['FECHA'].isna().all():
+                                print(f"Formato exitoso: {formato}")
+                                break
+                        except:
+                            continue
+                
+                # Si todavía falló, intentar conversión automática más agresiva
+                if df['FECHA'].isna().all():
+                    print("Intentando conversión automática...")
+                    # Limpiar y convertir strings
+                    df['FECHA_CLEAN'] = df['FECHA_ORIGINAL'].astype(str).str.strip()
+                    df['FECHA'] = pd.to_datetime(df['FECHA_CLEAN'], errors='coerce', dayfirst=True)
+            
+            print(f"Fechas después del procesamiento - primeras 10: {df['FECHA'].head(10).tolist()}")
+            print(f"Fechas no nulas: {df['FECHA'].notna().sum()}")
+            print(f"Fechas nulas: {df['FECHA'].isna().sum()}")
+            
+            # Filtrar fechas falsas (01.01.1900 significa "sin fecha real")
+            fechas_antes = df['FECHA'].notna().sum()
+            df.loc[df['FECHA'].dt.year == 1900, 'FECHA'] = pd.NaT
+            fechas_despues = df['FECHA'].notna().sum()
+            
+            print(f"Fechas 1900 filtradas: {fechas_antes - fechas_despues}")
+            print(f"Fechas válidas finales: {fechas_despues}")
+            
+            if fechas_despues > 0:
+                fecha_min = df['FECHA'].min()
+                fecha_max = df['FECHA'].max()
+                print(f"Rango de fechas válidas: {fecha_min} - {fecha_max}")
+                
+                # Agregar columnas auxiliares para análisis temporal
+                df['AÑO'] = df['FECHA'].dt.year
+                df['MES'] = df['FECHA'].dt.month
+                df['AÑO_MES'] = df['FECHA'].dt.to_period('M')
+            else:
+                print("⚠️ No se encontraron fechas válidas para análisis temporal")
+                
+        else:
+            print("⚠️ No se encontró columna FECHA")
+            
         return df
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error cargando datos: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
+def crear_tabla_ventas_mensuales(df_vendidos):
+    """Crear tabla de ventas por mes y año"""
+    if df_vendidos.empty:
+        return html.Div([
+            html.H6("📊 Sin datos de ventas", className="text-center text-muted"),
+            html.P("No hay propiedades vendidas para mostrar", className="text-center text-muted")
+        ])
+    
+    if 'FECHA' not in df_vendidos.columns:
+        return html.Div([
+            html.H6("📊 Sin columna de fechas", className="text-center text-muted"),
+            html.P("Los datos no contienen información de fechas", className="text-center text-muted")
+        ])
+    
+    # Filtrar solo las propiedades vendidas (con fecha)
+    df_con_fecha = df_vendidos.dropna(subset=['FECHA'])
+    
+    if df_con_fecha.empty:
+        return html.Div([
+            html.H6("📊 Sin fechas válidas", className="text-center text-muted"),
+            html.P("No hay ventas con fechas válidas para analizar", className="text-center text-muted")
+        ])
+    
+    try:
+        # Crear tabla pivote
+        tabla_pivot = df_con_fecha.groupby(['AÑO', 'MES']).size().unstack(fill_value=0)
+        
+        # Agregar totales
+        tabla_pivot['TOTAL'] = tabla_pivot.sum(axis=1)
+        tabla_pivot.loc['TOTAL'] = tabla_pivot.sum(axis=0)
+        
+        # Crear nombres de meses
+        meses_nombres = {
+            1: 'Ene', 2: 'Feb', 3: 'Mar', 4: 'Abr', 5: 'May', 6: 'Jun',
+            7: 'Jul', 8: 'Ago', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dic'
+        }
+        
+        # Crear la tabla HTML
+        tabla_html = html.Table([
+            # Header
+            html.Thead([
+                html.Tr([html.Th("AÑO", className="text-center", style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'})] + 
+                    [html.Th(meses_nombres.get(mes, f"M{mes}"), className="text-center",
+                            style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'}) 
+                        for mes in sorted(tabla_pivot.columns[:-1])] +
+                    [html.Th("TOTAL", className="text-center", 
+                            style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'})])
+            ]),
+            # Body
+            html.Tbody([
+                html.Tr([
+                    html.Td(html.B(str(int(año))) if año != 'TOTAL' else html.B("TOTAL"), 
+                        className="text-center",
+                        style={'font-weight': 'bold', 'background-color': '#2d2c55', 'color': 'white'} if año == 'TOTAL' else {'font-weight': 'bold'}),
+                    *[html.Td(str(int(tabla_pivot.loc[año, mes])) if tabla_pivot.loc[año, mes] > 0 else "-",
+                            className="text-center",
+                            style={'background-color': '#2d2c55', 'color': 'white'} if año == 'TOTAL' else {}) 
+                    for mes in sorted(tabla_pivot.columns[:-1])],
+                    html.Td(html.B(str(int(tabla_pivot.loc[año, 'TOTAL']))), 
+                        className="text-center",
+                        style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'} if año == 'TOTAL' else {'background-color': '#f8f9fa', 'font-weight': 'bold'})
+                ], style={'background-color': '#2d2c55'} if año == 'TOTAL' else {})
+                for año in tabla_pivot.index
+            ])  
+        ], className="table table-striped table-sm table-bordered")
+        
+        return html.Div([
+            html.P(f"📊 Total ventas analizadas: {len(df_con_fecha)}", 
+                   className="text-center text-muted mb-2"),
+            tabla_html
+        ])
+        
+    except Exception as e:
+        print(f"Error creando tabla: {e}")
+        return html.Div([
+            html.H6("❌ Error procesando datos", className="text-center text-danger"),
+            html.P(f"Error: {str(e)}", className="text-center text-muted")
+        ])
+
+def crear_tabla_precios_mensuales(df_vendidos):
+    """Crear tabla de precios promedio UF/m² por mes y año"""
+    if df_vendidos.empty:
+        return html.Div([
+            html.H6("📊 Sin datos de precios", className="text-center text-muted"),
+            html.P("No hay propiedades vendidas para mostrar", className="text-center text-muted")
+        ])
+    
+    if 'FECHA' not in df_vendidos.columns:
+        return html.Div([
+            html.H6("📊 Sin columna de fechas", className="text-center text-muted"),
+            html.P("Los datos no contienen información de fechas", className="text-center text-muted")
+        ])
+    
+    # Filtrar solo las propiedades vendidas (con fecha)
+    df_con_fecha = df_vendidos.dropna(subset=['FECHA'])
+    
+    if df_con_fecha.empty:
+        return html.Div([
+            html.H6("📊 Sin fechas válidas", className="text-center text-muted"),
+            html.P("No hay ventas con fechas válidas para analizar", className="text-center text-muted")
+        ])
+    
+    if 'UF/M2' not in df_con_fecha.columns:
+        return html.Div([
+            html.H6("📊 Sin datos UF/m²", className="text-center text-muted"),
+            html.P("No hay información de precios UF/m²", className="text-center text-muted")
+        ])
+    
+    try:
+        # Crear tabla pivote con promedio de UF/M2
+        tabla_pivot = df_con_fecha.groupby(['AÑO', 'MES'])['UF/M2'].mean().unstack(fill_value=0)
+        
+        # Agregar promedio total por año
+        tabla_pivot['PROMEDIO'] = df_con_fecha.groupby('AÑO')['UF/M2'].mean()
+        
+        # Agregar promedio total por mes
+        promedios_mes = df_con_fecha.groupby('MES')['UF/M2'].mean()
+        promedio_general = df_con_fecha['UF/M2'].mean()
+        
+        # Crear fila de totales
+        fila_totales = {}
+        for mes in tabla_pivot.columns[:-1]:  # Excluir columna PROMEDIO
+            if mes in promedios_mes.index:
+                fila_totales[mes] = promedios_mes[mes]
+            else:
+                fila_totales[mes] = 0
+        fila_totales['PROMEDIO'] = promedio_general
+        
+        # Agregar fila de totales
+        tabla_pivot.loc['PROMEDIO'] = pd.Series(fila_totales)
+        
+        # Crear nombres de meses
+        meses_nombres = {
+            1: 'Ene', 2: 'Feb', 3: 'Mar', 4: 'Abr', 5: 'May', 6: 'Jun',
+            7: 'Jul', 8: 'Ago', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dic'
+        }
+        
+        # Crear la tabla HTML
+        tabla_html = html.Table([
+            # Header
+            html.Thead([
+                html.Tr([html.Th("AÑO", className="text-center", style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'})] + 
+                    [html.Th(meses_nombres.get(mes, f"M{mes}"), className="text-center",
+                            style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'}) 
+                        for mes in sorted(tabla_pivot.columns[:-1])] +
+                    [html.Th("PROMEDIO", className="text-center", 
+                            style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'})])
+            ]),
+            # Body
+            html.Tbody([
+                html.Tr([
+                    html.Td(html.B(str(int(año))) if año != 'PROMEDIO' else html.B("PROMEDIO"), 
+                        className="text-center",
+                        style={'font-weight': 'bold', 'background-color': '#2d2c55', 'color': 'white'} if año == 'PROMEDIO' else {'font-weight': 'bold'}),
+                    *[html.Td(f"{tabla_pivot.loc[año, mes]:.1f}" if tabla_pivot.loc[año, mes] > 0 else "-",
+                            className="text-center",
+                            style={'background-color': '#2d2c55', 'color': 'white'} if año == 'PROMEDIO' else {}) 
+                    for mes in sorted(tabla_pivot.columns[:-1])],
+                    html.Td(html.B(f"{tabla_pivot.loc[año, 'PROMEDIO']:.1f}"), 
+                        className="text-center",
+                        style={'background-color': '#2d2c55', 'color': 'white', 'font-weight': 'bold'} if año == 'PROMEDIO' else {'background-color': '#e8f4f8', 'font-weight': 'bold'})
+                ], style={'background-color': '#2d2c55'} if año == 'PROMEDIO' else {})
+                for año in tabla_pivot.index
+            ])
+        ], className="table table-striped table-sm table-bordered")
+        
+        return html.Div([
+            html.P(f"💰 Precios promedio UF/m² por período", 
+                   className="text-center text-muted mb-2"),
+            tabla_html
+        ])
+        
+    except Exception as e:
+        print(f"Error creando tabla precios: {e}")
+        return html.Div([
+            html.H6("❌ Error procesando precios", className="text-center text-danger"),
+            html.P(f"Error: {str(e)}", className="text-center text-muted")
+        ])
+
 def crear_grafico_3d(df_filtrado):
-    """Crear solo el gráfico 3D del edificio"""
+    """Crear gráfico 3D del edificio con layout 3x3"""
     
     colores_estados = {
-        'Disponible': '#28A745',
-        'Moncurri': '#FFC107',     # Cambio de Reservado a Moncurri
-        'Promesado': '#DC3545',
-        'Stock Ausente': '#6C757D'
+        'Disponible': '#28A745',    # Verde
+        'Reserva': '#FFC107',       # Amarillo  
+        'Promesa': '#DC3545',       # Rojo
+        'Stock Ausente': '#6C757D'  # Gris
     }
     
+    # Layout 3x3 con escaleras en el centro (posición 1,1)
+    # Tipos y sus orientaciones:
     posiciones = {
-        3: (0, 1), 2: (1, 1), 1: (2, 1), 13: (4, 1), 12: (5, 1), 11: (6, 1),  # Norte
-        4: (0, 0), 5: (1, 0), 6: (2, 0), 7: (3, 0), 8: (4, 0), 9: (5, 0), 10: (6, 0)  # Sur
+        2: (0, 2),  # Poniente-Norte (izquierda arriba)
+        3: (1, 2),  # Norte (centro arriba)  
+        4: (2, 2),  # Norte-Oriente (derecha arriba)
+        5: (2, 1),  # Oriente (derecha centro)
+        6: (2, 0),  # Oriente-Sur (derecha abajo)
+        7: (1, 0),  # Sur (centro abajo)
+        8: (0, 0),  # Sur-Poniente (izquierda abajo)
+        1: (0, 1)   # Poniente (izquierda centro)
+        # Escaleras en (1, 1) - centro
     }
     
-    escalera_pos = (3, 1)
+    escalera_pos = (1, 1)
     
     fig = go.Figure()
     
@@ -41,17 +317,46 @@ def crear_grafico_3d(df_filtrado):
         x, y = posiciones[tipo]
         z = depto['PISO']
         
-        color = colores_estados.get(depto['ESTADO'], '#CCCCCC')
+        # Normalizar el estado para asegurar coincidencia exacta
+        estado_normalizado = str(depto['ESTADO']).strip()
+        color = colores_estados.get(estado_normalizado, '#CCCCCC')
+        
+        # Debug: verificar que el estado se esté leyendo correctamente
+        if estado_normalizado not in colores_estados:
+            print(f"⚠️ Estado desconocido: '{estado_normalizado}' - usando color gris por defecto")
         
         precio = depto.get('PRECIO', 0)
         superficie = depto.get('M2', 0)
         uf_m2 = depto.get('UF/M2', 0)
+        tipologia = depto.get('TIPOLOGIA', 'N/A')
         
-        hover_text = f"""<b style='color:#2C3E50; font-size:14px;'>🏢 Tipo {tipo} - Piso {z}</b><br>
-        <span style='color:#28A745;'><b>Estado:</b></span> <b>{depto['ESTADO']}</b><br>
-        <span style='color:#007BFF;'><b>Precio:</b></span> <b>${precio:,.0f}</b><br>
-        <span style='color:#FF6B6B;'><b>Superficie:</b></span> <b>{superficie} m²</b><br>
-        <span style='color:#9C27B0;'><b>UF/m²:</b></span> <b>{uf_m2:.2f}</b>"""
+        # Información de fecha si está disponible
+        fecha_info = ""
+        if 'FECHA' in depto.index and pd.notna(depto['FECHA']):
+            fecha_info = f"<span style='color:#0C0404;'><b>Fecha:</b></span> <b>{depto['FECHA'].strftime('%d/%m/%Y')}</b><br>"
+        
+        # Mapeo de orientaciones
+        orientaciones = {
+            1: 'Poniente',
+            2: 'Poniente-Norte', 
+            3: 'Norte',
+            4: 'Norte-Oriente',
+            5: 'Oriente',
+            6: 'Oriente-Sur',
+            7: 'Sur',
+            8: 'Sur-Poniente'
+        }
+        
+        orientacion = orientaciones.get(tipo, 'N/A')
+        
+        hover_text = f"""<b style='color:#0C0404; font-size:14px;'>🏢 Tipo {tipo} - Piso {z}</b><br>
+        <span style='color:#0C0404;'><b>Estado:</b></span> <b>{estado_normalizado}</b><br>
+        <span style='color:#0C0404;'><b>Precio:</b></span> <b>UF {precio:,.0f}</b><br>
+        <span style='color:#0C0404;'><b>Superficie:</b></span> <b>{superficie} m²</b><br>
+        <span style='color:#0C0404;'><b>UF/m²:</b></span> <b>{uf_m2:.2f}</b><br>
+        <span style='color:#0C0404;'><b>Tipología:</b></span> <b>{tipologia}</b><br>
+        <span style='color:#0C0404;'><b>Orientación:</b></span> <b>{orientacion}</b><br>
+        {fecha_info}"""
         
         # Cubo del departamento
         fig.add_trace(go.Mesh3d(
@@ -80,8 +385,8 @@ def crear_grafico_3d(df_filtrado):
             hoverinfo='skip'
         ))
     
-    # Escaleras
-    pisos_filtrados = df_filtrado['PISO'].unique()
+    # Escaleras (centro del edificio)
+    pisos_filtrados = df_filtrado['PISO'].unique() if len(df_filtrado) > 0 else []
     for piso in pisos_filtrados:
         x_esc, y_esc = escalera_pos
         
@@ -100,13 +405,13 @@ def crear_grafico_3d(df_filtrado):
     
     fig.update_layout(
         scene=dict(
-            xaxis=dict(showticklabels=False, title='', showgrid=False, range=[0, 8]),
-            yaxis=dict(showticklabels=False, title='', showgrid=False, range=[0, 2]),
+            xaxis=dict(showticklabels=False, title='', showgrid=False, range=[0, 3]),
+            yaxis=dict(showticklabels=False, title='', showgrid=False, range=[0, 3]),
             zaxis=dict(showticklabels=False, title='', showgrid=False, 
-                      range=[1, max(df_filtrado['PISO']) + 1] if len(df_filtrado) > 0 else [1, 11]),
+                      range=[1.5, max(df_filtrado['PISO']) + 1] if len(df_filtrado) > 0 else [1.5, 16]),
             camera=dict(eye=dict(x=1.5, y=1.5, z=1.2)),
             aspectmode='manual',
-            aspectratio=dict(x=3, y=1, z=2),
+            aspectratio=dict(x=1, y=1, z=3),
             bgcolor='#F8F9FA'
         ),
         showlegend=False,
@@ -125,31 +430,46 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 
 # Cargar datos globalmente
+print("🔄 Cargando datos...")
 df_global = cargar_datos("Datos.xlsx")
 
 # Layout de la aplicación
 app.layout = dbc.Container([
     
-    # Header principal
+    # Header principal con fondo azul
     dbc.Row([
         dbc.Col([
             html.Div([
-                html.H1("🏢 Dashboard Inmobiliario Interactivo", 
-                       className="display-4 text-center mb-2",
-                       style={'color': '#2C3E50', 'fontWeight': 'bold'}),
-                html.P("Análisis integral de UF/M² con filtros dinámicos", 
-                      className="lead text-center text-muted")
-            ], className="bg-white rounded shadow-sm p-4 mb-4")
+                dbc.Row([
+                    dbc.Col([
+                        html.H1("🏢 Dashboard San Miguel Etapa 2", 
+                            className="display-4 mb-2",
+                            style={'color': 'white', 'fontWeight': 'bold'}),
+                        html.P("Pagina web creada y administrada por Banmerchant", 
+                            className="lead", style={'color': '#E8E9EA'})
+                    ], width=10),
+                    dbc.Col([
+                        html.Img(
+                            src="/assets/LOGO.PNG",
+                            style={
+                                'height': '80px',
+                                'width': 'auto',
+                                'float': 'right'
+                            }
+                        )
+                    ], width=2, className="d-flex align-items-center justify-content-end")
+                ])
+            ], className="rounded shadow-sm p-4 mb-4", style={'background-color': '#2d2c55'})
         ], width=12)
     ]),
-    
+        
     # Panel de filtros y estadísticas
     dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader([
-                    html.H4("🔍 Filtros y Controles", className="mb-0", style={'color': '#2C3E50'})
-                ]),
+                    html.H4("🔍 Filtros y Controles", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
                 dbc.CardBody([
                     dbc.Row([
                         dbc.Col([
@@ -162,16 +482,18 @@ app.layout = dbc.Container([
                             ),
                         ], width=4),
                         dbc.Col([
-                            html.Label("Seleccionar Vista:", className="fw-bold mb-2"),
+                            html.Label("Seleccionar Orientación:", className="fw-bold mb-2"),
                             dcc.Dropdown(
-                                id='filtro-vista',
+                                id='filtro-orientacion',
                                 options=[
-                                    {'label': '🏔️ Todos los tipos', 'value': 'todos'},
-                                    {'label': '🏪 Solo Sin Lago', 'value': 'sin_lago'},
-                                    {'label': '🌊 Solo Con Lago', 'value': 'con_lago'}
+                                    {'label': '🧭 Todas las orientaciones', 'value': 'todas'},
+                                    {'label': '⬆️ Norte (N)', 'value': 'norte'},
+                                    {'label': '➡️ Oriente (E)', 'value': 'oriente'},
+                                    {'label': '⬇️ Sur (S)', 'value': 'sur'},
+                                    {'label': '⬅️ Poniente (W)', 'value': 'poniente'}
                                 ],
-                                value='todos',
-                                placeholder="Seleccionar vista",
+                                value='todas',
+                                placeholder="Seleccionar orientación",
                                 className="mb-3"
                             ),
                         ], width=4),
@@ -189,9 +511,15 @@ app.layout = dbc.Container([
                         dbc.Col([
                             html.Label("Vista Rápida:", className="fw-bold mb-2"),
                             dbc.ButtonGroup([
-                                dbc.Button("🏠 Todos", id="btn-todos", color="outline-primary", size="sm"),
-                                dbc.Button("🏔️ Pisos Altos", id="btn-altos", color="outline-success", size="sm"),
-                                dbc.Button("🏪 Pisos Bajos", id="btn-bajos", color="outline-info", size="sm"),
+                                dbc.Button("🏠 Todos", id="btn-todos", 
+                                          style={'background-color': '#2d2c55', 'border-color': '#2d2c55', 'color': 'white'}, 
+                                          size="sm"),
+                                dbc.Button("🏔️ Pisos Altos", id="btn-altos", 
+                                          style={'background-color': '#2d2c55', 'border-color': '#2d2c55', 'color': 'white'}, 
+                                          size="sm"),
+                                dbc.Button("🏪 Pisos Bajos", id="btn-bajos", 
+                                          style={'background-color': '#2d2c55', 'border-color': '#2d2c55', 'color': 'white'}, 
+                                          size="sm"),
                             ], className="d-grid")
                         ], width=6),
                         dbc.Col([
@@ -201,8 +529,8 @@ app.layout = dbc.Container([
                                 options=[
                                     {'label': '📊 Todos los estados', 'value': 'todos'},
                                     {'label': '🟢 Solo Disponibles', 'value': 'disponible'},
-                                    {'label': '🟡 Solo Moncurri', 'value': 'moncurri'},  # Cambio aquí
-                                    {'label': '🔴 Solo Promesados', 'value': 'promesado'}
+                                    {'label': '🟡 Solo Reservas', 'value': 'reserva'},
+                                    {'label': '🔴 Solo Promesas', 'value': 'promesa'}
                                 ],
                                 value='todos',
                                 placeholder="Seleccionar estados"
@@ -216,6 +544,9 @@ app.layout = dbc.Container([
         ], width=8),
         dbc.Col([
             dbc.Card([
+                dbc.CardHeader([
+                    html.H5("📊 Métricas Generales", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
                 dbc.CardBody([
                     html.Div(id="metricas-resumen", className="text-center")
                 ])
@@ -223,13 +554,13 @@ app.layout = dbc.Container([
         ], width=4)
     ], className="mb-4"),
     
-    # Gráfico 3D principal
+    # Gráfico 3D principal con tablas laterales
     dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader([
-                    html.H4("🏢 Visualización 3D del Edificio", className="mb-0", style={'color': '#2C3E50'})
-                ]),
+                    html.H4("🏢 Visualización 3D", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
                 dbc.CardBody([
                     dcc.Loading(
                         id="loading-3d",
@@ -247,8 +578,85 @@ app.layout = dbc.Container([
                     )
                 ])
             ], className="shadow-sm")
+        ], width=8),
+        dbc.Col([
+            # Tabla de ventas mensuales
+            dbc.Card([
+                dbc.CardHeader([
+                    html.H5("📊 Ventas por Mes/Año", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
+                dbc.CardBody([
+                    html.Div(
+                        id="tabla-ventas-mensuales",
+                        style={'maxHeight': '300px', 'overflowY': 'auto'}
+                    )
+                ], style={'padding': '10px'})
+            ], className="shadow-sm mb-3"),
+            
+            # Tabla de precios mensuales
+            dbc.Card([
+                dbc.CardHeader([
+                    html.H5("💰 Precios UF/m² por Mes/Año", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
+                dbc.CardBody([
+                    html.Div(
+                        id="tabla-precios-mensuales",
+                        style={'maxHeight': '300px', 'overflowY': 'auto'}
+                    )
+                ], style={'padding': '10px'})
+            ], className="shadow-sm")
+        ], width=4)
+    ], className="mb-4"),
+    
+    # Información de orientaciones
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader([
+                    html.H4("🧭 Mapa de Orientaciones", className="mb-0", style={'color': 'white'})
+                ], style={'background-color': '#2d2c55'}),
+                dbc.CardBody([
+                    html.Div([
+                        html.P("Distribución de tipos por orientación:", className="mb-3 fw-bold"),
+                        dbc.Row([
+                            dbc.Col([
+                                html.Div([
+                                    html.H6("⬆️ NORTE", className="text-center mb-2", style={'color': '#007BFF'}),
+                                    html.P("• Tipo 2: Poniente-Norte", className="mb-1"),
+                                    html.P("• Tipo 3: Norte", className="mb-1"),
+                                    html.P("• Tipo 4: Norte-Oriente", className="mb-0")
+                                ], className="border rounded p-3", style={'border-color': '#4a4a7a !important'})
+                            ], width=3),
+                            dbc.Col([
+                                html.Div([
+                                    html.H6("➡️ ORIENTE", className="text-center mb-2", style={'color': '#28A745'}),
+                                    html.P("• Tipo 3: Norte", className="mb-1"),
+                                    html.P("• Tipo 4: Norte-Oriente", className="mb-1"),
+                                    html.P("• Tipo 5: Oriente", className="mb-0")
+                                ], className="border rounded p-3", style={'border-color': '#4a4a7a !important'})
+                            ], width=3),
+                            dbc.Col([
+                                html.Div([
+                                    html.H6("⬇️ SUR", className="text-center mb-2", style={'color': '#FFC107'}),
+                                    html.P("• Tipo 6: Oriente-Sur", className="mb-1"),
+                                    html.P("• Tipo 7: Sur", className="mb-1"),
+                                    html.P("• Tipo 8: Sur-Poniente", className="mb-0")
+                                ], className="border rounded p-3", style={'border-color': '#4a4a7a !important'})
+                            ], width=3),
+                            dbc.Col([
+                                html.Div([
+                                    html.H6("⬅️ PONIENTE", className="text-center mb-2", style={'color': '#DC3545'}),
+                                    html.P("• Tipo 8: Sur-Poniente", className="mb-1"),
+                                    html.P("• Tipo 1: Poniente", className="mb-1"),
+                                    html.P("• Tipo 2: Poniente-Norte", className="mb-0")
+                                ], className="border rounded p-3", style={'border-color': '#4a4a7a !important'})
+                            ], width=3)
+                        ])
+                    ])
+                ])
+            ], className="shadow-sm")
         ], width=12)
-    ], className="mb-4")
+    ])
     
 ], fluid=True, style={'backgroundColor': '#F8F9FA', 'minHeight': '100vh', 'padding': '20px'})
 
@@ -263,7 +671,7 @@ app.layout = dbc.Container([
 )
 def inicializar_filtros(_):
     if df_global is not None:
-        # Opciones de pisos
+        # Opciones de pisos (del 2 al 15)
         pisos_disponibles = sorted(df_global['PISO'].unique())
         opciones_pisos = [{'label': f'Piso {piso}', 'value': piso} for piso in pisos_disponibles]
         
@@ -298,28 +706,29 @@ def botones_vista_rapida(btn_todos, btn_altos, btn_bajos):
     if button_id == 'btn-todos':
         return pisos_disponibles
     elif button_id == 'btn-altos':
-        piso_medio = sum(pisos_disponibles) / len(pisos_disponibles)
-        return [p for p in pisos_disponibles if p > piso_medio]
+        # Pisos altos: del 9 al 15
+        return [p for p in pisos_disponibles if p >= 9]
     elif button_id == 'btn-bajos':
-        piso_medio = sum(pisos_disponibles) / len(pisos_disponibles)
-        return [p for p in pisos_disponibles if p <= piso_medio]
+        return [p for p in pisos_disponibles if p <= 8]
     
     return dash.no_update
 
 @app.callback(
     [Output('grafico-3d', 'figure'),
      Output('metricas-resumen', 'children'),
-     Output('info-filtros', 'children')],
+     Output('info-filtros', 'children'),
+     Output('tabla-ventas-mensuales', 'children'),
+     Output('tabla-precios-mensuales', 'children')],
     [Input('filtro-pisos', 'value'),
-     Input('filtro-vista', 'value'),
+     Input('filtro-orientacion', 'value'),
      Input('filtro-estados', 'value'),
      Input('filtro-tipologia', 'value')]
 )
-def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_seleccionados, tipologias_seleccionadas):
+def actualizar_dashboard(pisos_seleccionados, orientacion_seleccionada, estados_seleccionados, tipologias_seleccionadas):
     if df_global is None:
         fig_vacia = go.Figure()
         fig_vacia.add_annotation(text="❌ No se pudieron cargar los datos", x=0.5, y=0.5)
-        return fig_vacia, html.Div("Error en datos"), "Error"
+        return fig_vacia, html.Div("Error en datos"), "Error", html.Div("Error"), html.Div("Error")
     
     # Filtrar datos por pisos
     if pisos_seleccionados and len(pisos_seleccionados) > 0:
@@ -327,22 +736,25 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     else:
         df_filtrado = df_global.copy()
     
-    # Filtrar por vista (Sin Lago / Con Lago)
-    tipos_sin_lago = [1, 2, 3, 11, 12, 13]
-    tipos_con_lago = [4, 5, 6, 7, 8, 9, 10]
+    # Filtrar por orientación
+    orientaciones_tipos = {
+        'norte': [2, 3, 4],      # ARRIBA: Tipos 2, 3, 4
+        'oriente': [3, 4, 5],    # DERECHA: Tipos 3, 4, 5  
+        'sur': [6, 7, 8],        # ABAJO: Tipos 6, 7, 8
+        'poniente': [8, 1, 2]    # IZQUIERDA: Tipos 8, 1, 2
+    }
     
-    if vista_seleccionada == 'sin_lago':
-        df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_sin_lago)]
-    elif vista_seleccionada == 'con_lago':
-        df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_con_lago)]
+    if orientacion_seleccionada in orientaciones_tipos:
+        tipos_filtrados = orientaciones_tipos[orientacion_seleccionada]
+        df_filtrado = df_filtrado[df_filtrado['TIPO'].isin(tipos_filtrados)]
     
-    # Filtrar por estados (cambio de 'reservado' a 'moncurri')
+    # Filtrar por estados
     if estados_seleccionados == 'disponible':
         df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Disponible']
-    elif estados_seleccionados == 'moncurri':  # Cambio aquí
-        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Moncurri']
-    elif estados_seleccionados == 'promesado':
-        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Promesado']
+    elif estados_seleccionados == 'reserva':
+        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Reserva']
+    elif estados_seleccionados == 'promesa':
+        df_filtrado = df_filtrado[df_filtrado['ESTADO'] == 'Promesa']
     
     # Filtrar por tipología
     if tipologias_seleccionadas and len(tipologias_seleccionadas) > 0 and 'TIPOLOGIA' in df_filtrado.columns:
@@ -351,14 +763,38 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     # Crear gráfico 3D
     fig_3d = crear_grafico_3d(df_filtrado)
     
+    # Para análisis temporal, usar solo datos vendidos (que tienen fecha real, no 1900)
+    if 'FECHA' in df_global.columns:
+        df_vendidos = df_global[df_global['FECHA'].notna()]
+        print(f"Debug: {len(df_vendidos)} ventas con fecha encontradas de {len(df_global)} total")
+    else:
+        df_vendidos = pd.DataFrame()
+        print("Debug: No hay columna FECHA en los datos")
+        
+    # Aplicar los mismos filtros al análisis temporal
+    if not df_vendidos.empty:
+        if pisos_seleccionados and len(pisos_seleccionados) > 0:
+            df_vendidos = df_vendidos[df_vendidos['PISO'].isin(pisos_seleccionados)]
+        
+        if orientacion_seleccionada in orientaciones_tipos:
+            tipos_filtrados = orientaciones_tipos[orientacion_seleccionada]
+            df_vendidos = df_vendidos[df_vendidos['TIPO'].isin(tipos_filtrados)]
+        
+        if tipologias_seleccionadas and len(tipologias_seleccionadas) > 0 and 'TIPOLOGIA' in df_vendidos.columns:
+            df_vendidos = df_vendidos[df_vendidos['TIPOLOGIA'].isin(tipologias_seleccionadas)]
+    
+    # Crear análisis temporal
+    tabla_ventas = crear_tabla_ventas_mensuales(df_vendidos)
+    tabla_precios = crear_tabla_precios_mensuales(df_vendidos)
+    
     # Calcular métricas totales
     total_precio = df_filtrado['PRECIO'].sum() if 'PRECIO' in df_filtrado.columns else 0
     total_m2 = df_filtrado['M2'].sum() if 'M2' in df_filtrado.columns else 0
     promedio_uf_m2 = df_filtrado['UF/M2'].mean() if 'UF/M2' in df_filtrado.columns and len(df_filtrado) > 0 else 0
     total_departamentos = len(df_filtrado)
     
-    # Calcular métricas por estado (cambio aquí también)
-    estados = ['Disponible', 'Moncurri', 'Promesado']  # Cambio de 'Reservado' a 'Moncurri'
+    # Calcular métricas por estado
+    estados = ['Disponible', 'Reserva', 'Promesa']
     metricas_por_estado = {}
     
     for estado in estados:
@@ -383,7 +819,7 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H4(f"${total_precio:,.0f}", className="mb-0", style={'color': '#007BFF', 'fontWeight': 'bold'}),
+                    html.H4(f"UF {total_precio:,.0f}", className="mb-0", style={'color': '#007BFF', 'fontWeight': 'bold'}),
                     html.Small("Total Precio", className="text-muted")
                 ], className="text-center p-2 border rounded")
             ], width=3),
@@ -418,7 +854,7 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"${metricas_por_estado['Disponible']['precio']:,.0f}", className="mb-0", style={'color': '#28A745'}),
+                    html.H6(f"UF {metricas_por_estado['Disponible']['precio']:,.0f}", className="mb-0", style={'color': '#28A745'}),
                     html.Small("Precio Total", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
@@ -436,59 +872,59 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
             ], width=3)
         ], className="mb-2"),
         
-        # MONCURRI (cambio aquí)
-        html.H6("🟡 MONCURRI", className="mb-2", style={'color': '#FFC107', 'fontWeight': 'bold'}),
+        # RESERVAS
+        html.H6("🟡 RESERVAS", className="mb-2", style={'color': '#FFC107', 'fontWeight': 'bold'}),
         dbc.Row([
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Moncurri']['cantidad']}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Reserva']['cantidad']}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Cantidad", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"${metricas_por_estado['Moncurri']['precio']:,.0f}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"UF {metricas_por_estado['Reserva']['precio']:,.0f}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Precio Total", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Moncurri']['m2']:,.1f} m²", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Reserva']['m2']:,.1f} m²", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Superficie", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Moncurri']['uf_m2']:.2f}", className="mb-0", style={'color': '#FFC107'}),
+                    html.H6(f"{metricas_por_estado['Reserva']['uf_m2']:.2f}", className="mb-0", style={'color': '#FFC107'}),
                     html.Small("Prom. UF/m²", className="text-muted")
                 ], className="text-center p-1")
             ], width=3)
         ], className="mb-2"),
         
-        # PROMESADOS
-        html.H6("🔴 PROMESADOS", className="mb-2", style={'color': '#DC3545', 'fontWeight': 'bold'}),
+        # PROMESAS
+        html.H6("🔴 PROMESAS", className="mb-2", style={'color': '#DC3545', 'fontWeight': 'bold'}),
         dbc.Row([
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Promesado']['cantidad']}", className="mb-0", style={'color': '#DC3545'}),
+                    html.H6(f"{metricas_por_estado['Promesa']['cantidad']}", className="mb-0", style={'color': '#DC3545'}),
                     html.Small("Cantidad", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"${metricas_por_estado['Promesado']['precio']:,.0f}", className="mb-0", style={'color': '#DC3545'}),
+                    html.H6(f"UF {metricas_por_estado['Promesa']['precio']:,.0f}", className="mb-0", style={'color': '#DC3545'}),
                     html.Small("Precio Total", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Promesado']['m2']:,.1f} m²", className="mb-0", style={'color': '#DC3545'}),
+                    html.H6(f"{metricas_por_estado['Promesa']['m2']:,.1f} m²", className="mb-0", style={'color': '#DC3545'}),
                     html.Small("Superficie", className="text-muted")
                 ], className="text-center p-1")
             ], width=3),
             dbc.Col([
                 html.Div([
-                    html.H6(f"{metricas_por_estado['Promesado']['uf_m2']:.2f}", className="mb-0", style={'color': '#DC3545'}),
+                    html.H6(f"{metricas_por_estado['Promesa']['uf_m2']:.2f}", className="mb-0", style={'color': '#DC3545'}),
                     html.Small("Prom. UF/m²", className="text-muted")
                 ], className="text-center p-1")
             ], width=3)
@@ -497,8 +933,8 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     
     # Información de filtros mejorada
     total_disponibles = metricas_por_estado['Disponible']['cantidad']
-    total_moncurri = metricas_por_estado['Moncurri']['cantidad']  # Cambio aquí
-    total_promesados = metricas_por_estado['Promesado']['cantidad']
+    total_reservas = metricas_por_estado['Reserva']['cantidad']
+    total_promesas = metricas_por_estado['Promesa']['cantidad']
     
     # Crear texto descriptivo de filtros
     filtros_texto = []
@@ -509,18 +945,20 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
     else:
         filtros_texto.append("Pisos: Todos")
     
-    vista_texto = {
-        'todos': 'Todas las vistas',
-        'sin_lago': '🏪 Sin Lago únicamente',
-        'con_lago': '🌊 Con Lago únicamente'
+    orientacion_texto = {
+        'todas': 'Todas las orientaciones',
+        'norte': '⬆️ Norte únicamente',
+        'oriente': '➡️ Oriente únicamente',
+        'sur': '⬇️ Sur únicamente',
+        'poniente': '⬅️ Poniente únicamente'
     }
-    filtros_texto.append(f"Vista: {vista_texto.get(vista_seleccionada, 'Todas')}")
+    filtros_texto.append(f"Orientación: {orientacion_texto.get(orientacion_seleccionada, 'Todas')}")
     
     estado_texto = {
         'todos': 'Todos los estados',
         'disponible': '🟢 Solo Disponibles',
-        'moncurri': '🟡 Solo Moncurri',  # Cambio aquí
-        'promesado': '🔴 Solo Promesados'
+        'reserva': '🟡 Solo Reservas',
+        'promesa': '🔴 Solo Promesas'
     }
     filtros_texto.append(f"Estados: {estado_texto.get(estados_seleccionados, 'Todos')}")
     
@@ -535,20 +973,12 @@ def actualizar_dashboard(pisos_seleccionados, vista_seleccionada, estados_selecc
         html.P([
             html.Strong(f"Total: {total_departamentos} departamentos | "),
             html.Span(f"🟢 {total_disponibles} Disponibles", className="me-3"),
-            html.Span(f"🟡 {total_moncurri} Moncurri", className="me-3"),  # Cambio aquí
-            html.Span(f"🔴 {total_promesados} Promesados")
+            html.Span(f"🟡 {total_reservas} Reservas", className="me-3"),
+            html.Span(f"🔴 {total_promesas} Promesas")
         ], className="mb-0")
     ])
     
-    return fig_3d, metricas_componente, info_text
+    return fig_3d, metricas_componente, info_text, tabla_ventas, tabla_precios
 
-if __name__ == '__main__':
-    if df_global is not None:
-        print("🚀 Iniciando Dashboard Inmobiliario Interactivo...")
-        print(f"✅ Datos cargados: {len(df_global)} departamentos")
-        print(f"📊 Pisos disponibles: {sorted(df_global['PISO'].unique())}")
-        print("🌐 Abra su navegador en: http://127.0.0.1:8050")
-        app.run(debug=True, host='127.0.0.1', port=8050)
-    else:
-        print("❌ Error: No se pudo cargar 'Datos.xlsx'")
-        print("📋 Verifique que el archivo existe y tiene las columnas: TIPO, PISO, ESTADO, UF/M2")
+if __name__ == "__main__":
+    app.run(debug=True)
